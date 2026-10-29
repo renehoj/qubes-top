@@ -1,5 +1,8 @@
 # qubes-top
 
+<img width="1243" height="862" alt="qubes-top" src="https://github.com/user-attachments/assets/c27d3cb1-f9a6-4f2d-aa80-e16b323670bc" />
+
+
 `top` for Qubes OS: a small GTK3 window in dom0 that shows what every running
 qube is doing right now, with CPU, memory and processes.
 
