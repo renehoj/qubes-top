@@ -87,6 +87,8 @@ __all__ = [
     "format_bytes",
     "format_gib",
     "format_percent",
+    "format_rate",
+    "rate_unit",
     "normalize",
     "own_bounds",
     "HISTORY_WINDOW_S",
@@ -368,6 +370,31 @@ def format_gib(kib: float) -> str:
     if gib >= 1.0:
         return f"{gib:.1f}"
     return f"{gib:.2f}"
+
+
+def format_rate(bps: float) -> str:
+    """bytes per second -> "512 B/s" / "1.5 KiB/s" / "12.0 MiB/s" / "1.1 GiB/s".
+    Unlike ``format_bytes`` the unit goes down to bytes: an idle qube's disk
+    or network moves a few hundred bytes a second, and "0.0 MiB/s" would hide
+    that it moves at all."""
+    if bps < 1024:
+        return f"{bps:.0f} B/s"
+    for unit, suffix in ((2 ** 30, "GiB/s"), (2 ** 20, "MiB/s"),
+                         (2 ** 10, "KiB/s")):
+        if bps >= unit:
+            return f"{bps / unit:.1f} {suffix}"
+    return f"{bps:.0f} B/s"  # pragma: no cover - the loop always returns
+
+
+def rate_unit(hi: float) -> Tuple[float, str]:
+    """The axis unit for rates up to ``hi`` bytes/s: ``(divisor, suffix)``,
+    the largest of B/K/M/G that ``hi`` reaches. The suffixes are one letter
+    ("500K"): the y labels of a half-width chart have a 46 px gutter, and the
+    chart's title says the axis is per second."""
+    for unit, suffix in ((2.0 ** 30, "G"), (2.0 ** 20, "M"), (2.0 ** 10, "K")):
+        if hi >= unit:
+            return unit, suffix
+    return 1.0, "B"
 
 
 def format_percent(p: float) -> str:

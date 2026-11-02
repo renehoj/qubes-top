@@ -38,11 +38,13 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gtk, GLib  # noqa: E402  (pin above is intentional)
 
-from qubes_top.core import MemState, SampleModel
+from qubes_top.core import TICK_S, MemState, SampleModel
 from qubes_top.dom0.loop import build_collector
 from qubes_top.dom0.qubesadmin_adapter import QubesAdapter
 from qubes_top.ui.guestproc import GuestProcProvider, GuestProcPoller
 from qubes_top.ui.hostprovider import ProcHostProvider, host_to_record
+from qubes_top.ui.iostats import (IoHistory, NetIoProvider, RateMeter,
+                                read_vbd_bytes)
 from qubes_top.ui.labelcolors import LabelColorProvider
 from qubes_top.ui.model import LeftPaneModel
 from qubes_top.ui.processes import Dom0ProcProvider
@@ -104,6 +106,13 @@ def run() -> int:
     # background poller for the *selected* qube only (a fetch costs ~1 s and
     # must never run in the GLib loop).
     guest_proc_provider = GuestProcProvider()
+    # Disk and network I/O of the selected qube (D-27): the disk counters
+    # are dom0's own blkback files, read once per tick here; the network
+    # counters live in the qube's netvm and come from a second background
+    # poller (qvm-run + cat). Both become one rate per tick in ``io``.
+    io = IoHistory()
+    disk_meter = RateMeter()
+    net_meter = RateMeter()
     hz = _hz()
     # A mutable cell shared by the idle handler: the last known dom0 record
     # (reused when a host read fails so the dom0 row persists), the last
@@ -114,7 +123,9 @@ def run() -> int:
     # reading and ``proc_guest_name`` the qube it belongs to.
     state: Dict[str, object] = {"last_dom0": None, "proc_dom0": None,
                                 "last_frame": None, "proc_guest": None,
-                                "proc_guest_name": None, "proc_note": ""}
+                                "proc_guest_name": None, "proc_note": "",
+                                "net_key": None, "net_rates": None,
+                                "net_at": 0.0, "net_note": ""}
 
     def _update_pane() -> None:
         """Feed the right pane for the current selection from the last
@@ -173,7 +184,7 @@ def run() -> int:
         # with no selection the list takes the room. A "gone" selection keeps
         # them visible and frozen, the same way the detail page keeps its
         # data.
-        charts.update(pane.spec)
+        charts.update(pane.spec, io)
         charts.show_for(sel is not None)
         info.update(pane.spec)
         info.show_for(sel is not None)
@@ -194,6 +205,67 @@ def run() -> int:
     proc_poller = GuestProcPoller(guest_proc_provider, emit=_on_guest_proc,
                                   post=GLib.idle_add)
 
+    def _on_net_io(target, reading) -> bool:
+        """Main-loop callback: one netvm reading of the vif counters arrived.
+        The rate is kept with the ``(netvm, domid)`` it belongs to; the next
+        frame takes it only if that is still the selected qube's."""
+        state["net_key"] = target
+        state["net_rates"] = net_meter.feed(target, reading.ts,
+                                            reading.counters)
+        state["net_at"] = reading.ts
+        state["net_note"] = reading.note
+        return False  # one-shot idle
+
+    # One read per tick: the vif counters change continuously, so a faster
+    # poll would only add qvm-run calls the 2 s chart cannot show.
+    net_poller = GuestProcPoller(NetIoProvider(), emit=_on_net_io,
+                                 post=GLib.idle_add, interval=TICK_S)
+
+    def _sample_io(frame) -> None:
+        """One I/O value per frame for the selected qube (D-27), so the
+        series lines up with the CPU line tick for tick. dom0 has neither: its
+        disks are not blkback devices and it has no network. A selection the
+        frame does not know keeps its history frozen, like the other charts.
+        """
+        sel = model.selected()
+        if sel is None or sel == DOM0:
+            net_poller.set_target(None)
+            io.reset(sel)
+            io.disk_note = io.net_note = "not measured for dom0"
+            return
+        if sel not in frame.qubes:
+            net_poller.set_target(None)
+            return
+        record = frame.qubes[sel].record
+        domid = record.domid
+        key = (sel, domid)
+        if domid < 0:
+            net_poller.set_target(None)
+            io.push(key, None, None)
+            io.disk_note = io.net_note = "not running"
+            return
+        now = time.monotonic()
+        counters = read_vbd_bytes(domid)
+        disk = disk_meter.feed(key, now, counters)
+        meta = meta_provider.meta(sel)
+        netvm = meta.netvm if meta is not None else None
+        target = (netvm, domid) if netvm else None
+        net_poller.set_target(target)
+        net = None
+        fresh = now - float(state["net_at"]) <= 2.5 * TICK_S
+        if target is not None and state["net_key"] == target and fresh:
+            net = state["net_rates"]
+        io.push(key, disk, net)
+        io.netvm = netvm or ""
+        io.disk_note = ("" if counters is not None else
+                        "no blkback counters for domid %d" % domid)
+        if target is None:
+            io.net_note = "no netvm: no network to measure"
+        elif state["net_key"] == target and state["net_note"]:
+            io.net_note = str(state["net_note"])
+        else:
+            io.net_note = "reading the vif in %s…" % netvm
+
     def on_select(name: str) -> None:
         # The selection seam: the left pane already selected in its model;
         # the right pane (t_b14eabf7) is wired here, and the guest process
@@ -202,6 +274,9 @@ def run() -> int:
         # run can observe selection.
         print("qubes-top: selected %s" % name, flush=True)
         proc_poller.set_target(name)
+        # the I/O charts start over for the new qube (``IoHistory`` holds
+        # one); the next frame fills them
+        io.reset(name)
         _update_pane()
 
     window = QubesTopWindow(model, on_select=on_select, color_for=color_for)
@@ -262,6 +337,7 @@ def run() -> int:
         proc = proc_provider.list(DOM0)
         if proc is not None:
             state["proc_dom0"] = proc
+        _sample_io(frame)
         model.refresh(data)
         window.refresh()
         # a degraded frame reads in the footer's error red, as systemlist's
@@ -296,6 +372,7 @@ def run() -> int:
     # The guest process poller runs for the whole session and only works
     # when a guest is selected (dom0 needs no qvm-run).
     proc_poller.start()
+    net_poller.start()
     # The window's __init__ already called show_all() (the hard requirement);
     # nothing further is needed to make it visible.
     try:
@@ -305,6 +382,7 @@ def run() -> int:
     finally:
         collector.stop()
         proc_poller.stop()
+        net_poller.stop()
     return 0
 
 

@@ -40,7 +40,7 @@ from qubes_top.ui.processes import ProcessInfo
 
 __all__ = [
     "QUBE_NAME_RE", "GuestProcReading", "GuestProcProvider", "GuestProcPoller",
-    "parse_top", "qvm_run_argv", "run_qvm",
+    "parse_top", "qvm_run_argv", "qvm_run_prefix", "run_qvm",
 ]
 
 
@@ -70,17 +70,22 @@ TOP_DELAY_S = 1
 MAX_ROWS = 2048
 
 
+def qvm_run_prefix(name: str) -> List[str]:
+    """The one ``qvm-run`` invocation the monitor makes (D-15, D-27): quiet,
+    output piped back, and **no shell** — ``--no-shell`` is load-bearing:
+    ``qvm-run`` otherwise hands COMMAND to the guest's shell, and the command
+    would then be a string. With it, the guest execs the command directly, so
+    there is no shell to inject into. Every caller appends a fixed argv."""
+    return ["qvm-run", "-q", "-p", "--no-shell", name]
+
+
 def qvm_run_argv(name: str, delay: int = TOP_DELAY_S) -> List[str]:
     """The argv that reads one guest's process table.
 
-    ``--no-shell`` is load-bearing: ``qvm-run`` otherwise hands COMMAND to
-    the guest's shell, and the command would then be a string. With it, the
-    guest execs ``top`` directly, so there is no shell to inject into.
     ``-w`` (bare) asks for wide output so COMMAND is not truncated; procps-ng
     treats a bare ``-w`` as 512 columns in batch mode.
     """
-    return [
-        "qvm-run", "-q", "-p", "--no-shell", name,
+    return qvm_run_prefix(name) + [
         "top", "-b", "-n", "2", "-d", str(delay), "-w", "-o", "%CPU",
     ]
 

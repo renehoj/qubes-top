@@ -1,0 +1,20 @@
+#!/bin/sh
+# Run qubes-top straight from a source checkout, or from the installed tree
+# (~/.local/bin/qubes-top is a symlink to this file).
+#
+# The app is a package, so it is run as a module with the tree on sys.path
+# (same as qubes-cpu-affinity's bin/qubes-vcpu). The tree is found from this
+# file's real location: `readlink -f` follows the ~/.local/bin symlink, which
+# a plain `dirname "$0"` would resolve to ~/.local instead.
+#
+#   bin/qubes-top             # the GUI
+#   bin/qubes-top --probe     # the dom0 probe
+#   bin/qubes-top --api-audit # check every gi symbol the UI calls
+
+set -eu
+
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+exec python3 -m qubes_top "$@"

@@ -29,11 +29,13 @@ is no `qubes-top` entry point on PATH by default; the probe's
   first argument) clones origin/main, stamps `BUILD-COMMIT`, streams a
   tarball back over `qvm-run -p`; dom0 checks the archive and runs
   `--api-audit` against it before swapping the tree into
-  `~/.local/share/qubes-top`, then writes `~/.local/bin/qubes-top` and
+  `~/.local/share/qubes-top`, then links `~/.local/bin/qubes-top` to the
+  tree's `bin/qubes-top` and writes
   `~/.local/share/applications/qubes-top.desktop`. Running it again is an
   update. Only pushed commits deploy.
 - `qubes-top.desktop` — the menu entry, `OnlyShowIn=Qubes` so it does not
-  pollute a menu it was not asked to appear in. `Exec` carries the
+  pollute a menu it was not asked to appear in. `Exec` runs the tree's
+  `bin/qubes-top` and carries the
   `@QUBES_TOP_ROOT@` placeholder; one line resolves it (below).
 
 ## The artifact

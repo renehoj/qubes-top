@@ -2,7 +2,7 @@
 Type=Application
 Name=Qubes Top
 Comment=Monitor Qubes VMs — top for Qubes (card t_2e8dda49)
-Exec=@QUBES_TOP_ROOT@/packaging/qubes-top-run.sh
+Exec=@QUBES_TOP_ROOT@/bin/qubes-top
 Icon=utilities-system-monitor
 Terminal=false
 Categories=System;Monitor;

@@ -7,8 +7,8 @@
 # with the commit it came from, and streams one tarball back. dom0 validates
 # the archive, runs the gi audit against it, and only then installs:
 #
-#   ~/.local/share/qubes-top                        the tree (run via packaging/qubes-top-run.sh)
-#   ~/.local/bin/qubes-top                          a two-line wrapper exec'ing the launcher
+#   ~/.local/share/qubes-top                        the tree (run via its bin/qubes-top)
+#   ~/.local/bin/qubes-top                          symlink to that bin/qubes-top
 #   ~/.local/share/applications/qubes-top.desktop   the menu entry, @QUBES_TOP_ROOT@ resolved
 #
 # The program was called qvm-top until D-26. An install under that name is
@@ -74,7 +74,7 @@ tar xf "$workdir/$TARBALL" -C "$workdir"
 build="$workdir/$TOP_DIR/qubes-top"
 for check in qubes_top/__init__.py \
              qubes_top/__main__.py \
-             packaging/qubes-top-run.sh \
+             bin/qubes-top \
              packaging/qubes-top.desktop; do
     if [ ! -f "$build/$check" ]; then
         echo "install: $check missing from the archive" >&2
@@ -95,17 +95,13 @@ rm -rf "$SHARE_DIR/.qubes-top.new"
 cp -r "$build" "$SHARE_DIR/.qubes-top.new"
 rm -rf "$TREE"
 mv "$SHARE_DIR/.qubes-top.new" "$TREE"
-chmod 755 "$TREE/packaging/qubes-top-run.sh"
+chmod 755 "$TREE/bin/qubes-top" "$TREE/packaging/qubes-top-run.sh"
 
-# 4. PATH wrapper and menu entry. The wrapper exec's the launcher by its
-#    full path rather than symlinking it: qubes-top-run.sh resolves the tree
-#    from its own location, which a symlink would move to ~/.local.
+# 4. PATH symlink and menu entry. bin/qubes-top finds the tree through
+#    `readlink -f`, so a symlink to it works from ~/.local/bin; `ln -sf`
+#    also replaces the wrapper file earlier installs wrote there.
 mkdir -p "$BIN_DIR"
-cat > "$BIN_DIR/qubes-top" <<EOF
-#!/bin/sh
-exec "$TREE/packaging/qubes-top-run.sh" "\$@"
-EOF
-chmod 755 "$BIN_DIR/qubes-top"
+ln -sfn "$TREE/bin/qubes-top" "$BIN_DIR/qubes-top"
 mkdir -p "$SHARE_DIR/applications"
 sed "s|@QUBES_TOP_ROOT@|$TREE|" "$TREE/packaging/qubes-top.desktop" \
     > "$SHARE_DIR/applications/qubes-top.desktop"

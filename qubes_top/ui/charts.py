@@ -24,6 +24,14 @@ second. The y-axis has rounded gridlines with their values in a left gutter
 colour, with a dot on the newest value; the newest value is also written in
 the top strip, beside a legend for the memory chart's three lines. Text is
 drawn in the theme's own text colour, never in a series colour.
+
+**Four charts in the same room (D-27).** CPU and memory are joined by disk
+and network I/O of the selected qube, in a 2 x 2 grid of equal columns: CPU
+and memory on top, disk and network under them, each at the same fixed
+height as before, so the block is exactly as tall as the two stacked charts
+were. The I/O charts draw two lines each on the same window — read / written
+and in / out, in one colour pair — from ``iostats.IoHistory``, with the
+newest rates in their legend; an empty chart says why in words.
 """
 
 import math
@@ -36,10 +44,12 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gtk, Pango  # noqa: E402  (pin above is intentional)
 
 from qubes_top.core import (axis_ticks, format_bytes, format_percent,
-                          format_tick, normalize, window_segments,
-                          window_steps, window_x)
+                          format_rate, format_tick, normalize, rate_unit,
+                          window_segments, window_steps, window_x)
+from qubes_top.ui.iostats import IoHistory
 from qubes_top.ui.rightspec import DetailSpec
-from qubes_top.ui.theme import ALLOC_RGBA, CPU_RGBA, MAX_RGBA, MEM_RGBA
+from qubes_top.ui.theme import (ALLOC_RGBA, CPU_RGBA, IN_RGBA, MAX_RGBA,
+                              MEM_RGBA, OUT_RGBA)
 
 __all__ = ["HistoryCharts", "CHART_H", "trace"]
 
@@ -61,6 +71,13 @@ _FILL_ALPHA = 0.14
 
 #: KiB per GiB / MiB: the memory axis is labelled in GiB from 1 GiB up.
 _GIB_KIB, _MIB_KIB = 1024.0 * 1024.0, 1024.0
+
+#: The lowest top of an I/O axis, in bytes/s: an idle qube's few hundred
+#: bytes a second would otherwise fill the chart and read as busy.
+_RATE_FLOOR = 4.0 * 1024.0
+
+#: The gap between the four charts, in pixels.
+_GRID_GAP = 4
 
 _MINUS = "\u2212"
 
@@ -186,19 +203,32 @@ def _end_dot(cr, x: float, y: float, rgba) -> None:
 
 
 class HistoryCharts(Gtk.Box):
-    """The two large charts: CPU as a continuous line, memory as a step with
-    the live allocation and the max drawn as reference lines."""
+    """The four large charts, two by two: CPU as a continuous line, memory as
+    a step with the live allocation and the max drawn as reference lines,
+    and disk and network I/O as two lines each."""
 
     def __init__(self) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._spec: Optional[DetailSpec] = None
-        self._cpu_area = self._chart("CPU — % of one core (may exceed 100%)",
-                                     self._on_cpu_draw)
-        self._mem_area = self._chart("memory", self._on_mem_draw)
+        self._io: Optional[IoHistory] = None
+        # equal columns: each chart gets half the list's width, whatever the
+        # titles or the values in them
+        self._grid = Gtk.Grid(column_homogeneous=True,
+                              column_spacing=_GRID_GAP,
+                              row_spacing=_GRID_GAP)
+        self.pack_start(self._grid, False, False, 0)
+        self._cpu_area = self._chart("CPU — % of one core", self._on_cpu_draw,
+                                     0, 0)
+        self._mem_area = self._chart("memory", self._on_mem_draw, 1, 0)
+        self._disk_area = self._chart("disk I/O — per second",
+                                      self._on_disk_draw, 0, 1)
+        self._net_area = self._chart("network — per second",
+                                     self._on_net_draw, 1, 1)
 
-    def _chart(self, title: str, handler) -> Gtk.DrawingArea:
-        """One titled chart: a ``Gtk.Frame`` whose label is the title, holding
-        a fixed-height drawing area."""
+    def _chart(self, title: str, handler, col: int,
+               row: int) -> Gtk.DrawingArea:
+        """One titled chart in the grid: a ``Gtk.Frame`` whose label is the
+        title, holding a fixed-height drawing area."""
         frame = Gtk.Frame()
         frame.set_label_align(0.0, 0.5)
         frame.get_style_context().add_class("section")
@@ -213,21 +243,25 @@ class HistoryCharts(Gtk.Box):
         area.set_size_request(-1, CHART_H)
         area.connect("draw", handler)
         frame.add(area)
-        self.pack_start(frame, False, False, 0)
+        self._grid.attach(frame, col, row, 1, 1)
         return area
 
     # -- the app's seam -----------------------------------------------------
-    def update(self, spec: DetailSpec) -> None:
-        """Point the charts at the pane's (in-place refreshed) spec."""
+    def update(self, spec: DetailSpec,
+               io: Optional[IoHistory] = None) -> None:
+        """Point the charts at the pane's (in-place refreshed) spec and the
+        app's I/O history for the same selection."""
         self._spec = spec
-        self._cpu_area.queue_draw()
-        self._mem_area.queue_draw()
+        self._io = io
+        for area in (self._cpu_area, self._mem_area, self._disk_area,
+                     self._net_area):
+            area.queue_draw()
 
     def show_for(self, selected: bool) -> None:
         """Show while something is selected, hide otherwise.
 
         ``show_all`` rather than ``show``: GTK3 visibility is not inherited, so
-        showing the box alone would reveal two empty frames. Idempotent — the
+        showing the box alone would reveal four empty frames. Idempotent — the
         app calls this on every tick, and a full ``show_all`` walk per frame is
         pointless work.
         """
@@ -321,3 +355,55 @@ class HistoryCharts(Gtk.Box):
               plot.y0 - 4.0, _ink(area, 0.95), _VALUE_FONT_PX, align=1.0,
               bold=True)
         return False
+
+    def _on_disk_draw(self, area: Gtk.DrawingArea, cr) -> bool:
+        io = self._io
+        if io is None:
+            return False
+        return _draw_rates(cr, area, (io.disk_read, io.disk_write),
+                           ("read", "written"), io.disk_note)
+
+    def _on_net_draw(self, area: Gtk.DrawingArea, cr) -> bool:
+        io = self._io
+        if io is None:
+            return False
+        return _draw_rates(cr, area, (io.net_in, io.net_out), ("in", "out"),
+                           io.net_note)
+
+
+def _draw_rates(cr, area, series, names, note: str) -> bool:
+    """One I/O chart: two rate series (bytes/s, one value per tick) on the
+    fixed window, in the in/out colour pair, the newest value of each in the
+    legend. With no value at all, ``note`` (or a generic line) is written in
+    the middle instead: an empty chart always says why."""
+    plot = _Plot(area.get_allocated_width(), area.get_allocated_height())
+    if not plot.ok():
+        return False
+    vals = [v for s in series for v in s if v is not None]
+    unit, suffix = rate_unit(max(vals + [_RATE_FLOOR]))
+    top_u, ticks_u = axis_ticks(max(vals + [_RATE_FLOOR]) / unit)
+    top = top_u * unit
+    _grid(cr, area, plot, top, [v * unit for v in ticks_u],
+          lambda v: "0" if v == 0 else format_tick(v / unit) + suffix)
+    _time_axis(cr, area, plot)
+    legend = []
+    for values, rgba, name in zip(series, (IN_RGBA, OUT_RGBA), names):
+        latest = values[-1] if values else None
+        legend.append((rgba, name if latest is None
+                       else "%s %s" % (name, format_rate(latest))))
+    _legend(cr, area, plot, legend)
+    if not vals:
+        _text(cr, note or "waiting for the first two samples…",
+              plot.x0 + plot.w / 2.0, plot.y0 + plot.h / 2.0,
+              _ink(area, 0.6), _AXIS_FONT_PX + 1, align=0.5)
+        return False
+    cr.save()
+    cr.translate(plot.x0, plot.y0)
+    for values, rgba in zip(series, (IN_RGBA, OUT_RGBA)):
+        segs = window_segments(values, plot.w, plot.h, 0.0, top, 0.0)
+        for seg in segs:
+            trace(cr, seg, plot.h, rgba, fill_alpha=_FILL_ALPHA / 2.0)
+        if segs and values and values[-1] is not None:
+            _end_dot(cr, segs[-1][-1][0], segs[-1][-1][1], rgba)
+    cr.restore()
+    return False

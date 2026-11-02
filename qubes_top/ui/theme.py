@@ -27,11 +27,12 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gtk, Gdk  # noqa: E402  (pin above is intentional)
 
-from qubes_top.core import NORD8, NORD11, NORD13, NORD14
+from qubes_top.core import NORD8, NORD11, NORD12, NORD13, NORD14, NORD15
 
 __all__ = [
     "WINDOW_NAME", "PANE_CLASS", "WINDOW_ALPHA",
-    "CPU_RGBA", "MEM_RGBA", "ALLOC_RGBA", "MAX_RGBA", "rgba", "set_chrome", "prepare_transparency", "apply",
+    "CPU_RGBA", "MEM_RGBA", "ALLOC_RGBA", "MAX_RGBA", "IN_RGBA",
+    "OUT_RGBA", "rgba", "set_chrome", "prepare_transparency", "apply",
 ]
 
 #: The CSS name of the top-level window (``#qubes-top-window``).
@@ -53,6 +54,10 @@ CPU_RGBA = rgba(NORD8)            # CPU: Frost
 MEM_RGBA = rgba(NORD14)           # memory: Aurora green
 ALLOC_RGBA = rgba(NORD13, 0.9)    # the live-allocation line: Aurora yellow
 MAX_RGBA = rgba(NORD11, 0.9)      # the max line: Aurora red (the launcher red)
+# disk and network I/O (D-27): one pair for both charts, so "in" (read,
+# received) and "out" (written, sent) read the same in each
+IN_RGBA = rgba(NORD15)            # Aurora purple
+OUT_RGBA = rgba(NORD12)           # Aurora orange
 
 
 def is_theme_light(widget: Gtk.Widget) -> bool:
