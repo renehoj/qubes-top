@@ -1,3 +1,6 @@
+<img width="1153" height="815" alt="qubes-top2" src="https://github.com/user-attachments/assets/b13adc69-56d1-4d8d-b17b-22cf73efe30d" />
+
+
 # qubes-top
 
 "top for Qubes": a GTK3 window app that runs in Qubes dom0. Left pane: every
