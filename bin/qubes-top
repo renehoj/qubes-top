@@ -17,4 +17,7 @@ here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 
-exec python3 -m qubes_top "$@"
+# -P: do not put the current directory first on sys.path. `python3 -m` does
+# by default, so a json.py (or any module name) in the directory the app is
+# started from would shadow the stdlib and run in dom0. PYTHONPATH still works.
+exec python3 -P -m qubes_top "$@"

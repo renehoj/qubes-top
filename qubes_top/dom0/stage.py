@@ -194,7 +194,8 @@ def headless_cli_phase() -> list:
     apart). rc 2 is the probe's refusal: after the gate above it passed,
     so a refusal here is a contradiction the NOTE calls out."""
     try:
-        proc = subprocess.run([sys.executable, "-m", "qubes_top", "--probe"],
+        proc = subprocess.run([sys.executable, "-P", "-m", "qubes_top",
+                               "--probe"],
                              capture_output=True, text=True,
                              timeout=CLI_TIMEOUT_S)
     except subprocess.TimeoutExpired:

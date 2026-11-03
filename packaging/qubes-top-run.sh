@@ -26,4 +26,5 @@ if [ ! -f "$ROOT/qubes_top/__init__.py" ]; then
 fi
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 -m qubes_top "$@"
+# -P: the current directory stays off sys.path (see bin/qubes-top).
+exec python3 -P -m qubes_top "$@"

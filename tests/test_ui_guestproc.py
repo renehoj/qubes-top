@@ -25,6 +25,7 @@ from qubes_top.ui.guestproc import (  # noqa: E402
     GuestProcReading,
     parse_top,
     qvm_run_argv,
+    run_qvm,
 )
 
 #: Two real frames from procps-ng (captured on a Linux host, 80 columns for
@@ -143,10 +144,59 @@ class TestCommandShape(unittest.TestCase):
 
     def test_the_name_is_the_qube_not_a_command_fragment(self):
         argv = qvm_run_argv("browser-streaming")
-        # between --no-shell and the command, exactly one element: the name
-        i = argv.index("--no-shell")
+        # between the last option and the command, exactly one element: the
+        # name
+        i = argv.index("--filter-escape-chars")
         self.assertEqual(argv[i + 1], "browser-streaming")
         self.assertEqual(argv[i + 2], "top")
+
+
+class TestBoundedRunner(unittest.TestCase):
+    """``run_qvm`` reads guest-written bytes: stdout is capped, stderr is
+    truncated, a slow writer times out. A local python stands in for
+    ``qvm-run`` (the runner takes any argv)."""
+
+    @staticmethod
+    def _py(code):
+        return [sys.executable, "-c", code]
+
+    def test_normal_output_passes_through(self):
+        rc, out, err = run_qvm(self._py(
+            "import sys; print('hello'); print('oops', file=sys.stderr); "
+            "sys.exit(3)"), timeout=10)
+        self.assertEqual((rc, out, err), (3, "hello\n", "oops\n"))
+
+    def test_stdout_over_the_cap_is_a_failure(self):
+        rc, out, err = run_qvm(self._py(
+            "import sys\nwhile True: sys.stdout.write('x' * 65536)"),
+            timeout=10, max_out=100000)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("cap", err)
+
+    def test_stderr_is_truncated_not_fatal(self):
+        rc, out, err = run_qvm(self._py(
+            "import sys; sys.stderr.write('e' * 50000); print('ok')"),
+            timeout=10, max_err=10)
+        self.assertEqual((rc, out, err), (0, "ok\n", "e" * 10))
+
+    def test_a_silent_process_times_out(self):
+        rc, out, err = run_qvm(self._py("import time; time.sleep(30)"),
+                               timeout=0.5)
+        self.assertEqual(rc, 1)
+        self.assertIn("timed out", err)
+
+    def test_a_missing_command_is_a_reading_not_a_raise(self):
+        rc, out, err = run_qvm(["/nonexistent/qubes-top-test"], timeout=5)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertTrue(err)
+
+
+class TestNeverStartsAQube(unittest.TestCase):
+    def test_prefix_flags(self):
+        argv = qvm_run_argv("work")
+        for flag in ("--no-autostart", "--no-gui", "--filter-escape-chars"):
+            self.assertIn(flag, argv[:argv.index("work")])
 
 
 class FakeRunner:

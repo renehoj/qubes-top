@@ -29,7 +29,9 @@ on its own thread and never in the GLib loop.
 Everything here is pure: no ``gi``, no ``qubesadmin``, and the runner is
 injectable, so the parser and the polling logic are unit-tested off-box.
 """
+import os
 import re
+import selectors
 import subprocess
 import threading
 import time
@@ -70,13 +72,29 @@ TOP_DELAY_S = 1
 MAX_ROWS = 2048
 
 
+#: Caps on what one ``qvm-run`` may hand back. The guest (or netvm) writes
+#: these bytes, so without a cap a hostile one could stream gigabytes into
+#: dom0 within the timeout. Two ``top -w`` frames of ~500 rows at the 512
+#: column maximum are ~512 KiB, so 2 MiB leaves room; stderr only feeds a
+#: one-line note.
+MAX_STDOUT_BYTES = 2 * 1024 * 1024
+MAX_STDERR_BYTES = 4096
+
+
 def qvm_run_prefix(name: str) -> List[str]:
     """The one ``qvm-run`` invocation the monitor makes (D-15, D-27): quiet,
     output piped back, and **no shell** — ``--no-shell`` is load-bearing:
     ``qvm-run`` otherwise hands COMMAND to the guest's shell, and the command
     would then be a string. With it, the guest execs the command directly, so
-    there is no shell to inject into. Every caller appends a fixed argv."""
-    return ["qvm-run", "-q", "-p", "--no-shell", name]
+    there is no shell to inject into. Every caller appends a fixed argv.
+
+    ``--no-autostart``: a monitor never starts a qube. Without it, a qube
+    that halts between two polls (or a halted netvm) is started by the next
+    poll. ``--no-gui``: nothing here has a window. ``--filter-escape-chars``:
+    ``qvm-run`` filters only when its stdout is a terminal, and here it is a
+    pipe, so the filter is asked for explicitly."""
+    return ["qvm-run", "-q", "-p", "--no-shell", "--no-autostart",
+            "--no-gui", "--filter-escape-chars", name]
 
 
 def qvm_run_argv(name: str, delay: int = TOP_DELAY_S) -> List[str]:
@@ -90,22 +108,74 @@ def qvm_run_argv(name: str, delay: int = TOP_DELAY_S) -> List[str]:
     ]
 
 
-def run_qvm(argv: List[str], timeout: float) -> Tuple[int, str, str]:
+def run_qvm(argv: List[str], timeout: float,
+            max_out: int = MAX_STDOUT_BYTES,
+            max_err: int = MAX_STDERR_BYTES) -> Tuple[int, str, str]:
     """The default runner: ``qvm-run`` in dom0, captured, never raising.
 
-    Returns ``(returncode, stdout, stderr)``. ``qvm-run`` filters terminal
-    escape sequences by default, so a hostile guest cannot paint the
-    terminal through this pipe; we still decode leniently.
+    Returns ``(returncode, stdout, stderr)``. The output is guest-written, so
+    it is read **bounded**: stdout past ``max_out`` kills the process and is
+    a failure (a cut-off table is not a table), stderr past ``max_err`` is
+    read and dropped. Escape sequences are filtered by ``qvm-run`` itself
+    (``--filter-escape-chars`` in ``qvm_run_prefix``); we still decode
+    leniently.
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=timeout, check=False)
+            stderr=subprocess.PIPE)
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, "", str(exc)
+    try:
+        out, err, failure = _read_bounded(proc, timeout, max_out, max_err)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdout.close()
+        proc.stderr.close()
+    if failure:
+        return 1, "", failure
     return (proc.returncode,
-            proc.stdout.decode("utf-8", "replace"),
-            proc.stderr.decode("utf-8", "replace"))
+            out.decode("utf-8", "replace"),
+            err.decode("utf-8", "replace"))
+
+
+def _read_bounded(proc: "subprocess.Popen", timeout: float, max_out: int,
+                  max_err: int) -> Tuple[bytes, bytes, str]:
+    """Drain both pipes until EOF and the process exits, within ``timeout``.
+
+    Returns ``(stdout, stderr, failure)``; ``failure`` is "" on success and a
+    one-line reason when the deadline passed or stdout outgrew its cap (the
+    caller kills the process either way).
+    """
+    deadline = time.monotonic() + timeout
+    out, err = bytearray(), bytearray()
+    with selectors.DefaultSelector() as sel:
+        sel.register(proc.stdout, selectors.EVENT_READ, out)
+        sel.register(proc.stderr, selectors.EVENT_READ, err)
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return b"", b"", "timed out after %g s" % timeout
+            for key, _ in sel.select(left):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fileobj)
+                    continue
+                buf = key.data
+                if buf is out:
+                    buf += chunk
+                    if len(buf) > max_out:
+                        return b"", b"", \
+                            "output over the %d-byte cap" % max_out
+                else:
+                    buf += chunk[:max(0, max_err - len(buf))]
+    try:
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return b"", b"", "timed out after %g s" % timeout
+    return bytes(out), bytes(err), ""
 
 
 def _number(text: str) -> Optional[float]:

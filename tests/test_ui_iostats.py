@@ -80,9 +80,11 @@ class TestReadVbd(unittest.TestCase):
 class TestVif(unittest.TestCase):
     def test_argv_has_no_shell_and_names_the_domids_vif(self):
         argv = vif_argv("sys-firewall", 12)
-        self.assertEqual(argv[:6], ["qvm-run", "-q", "-p", "--no-shell",
+        self.assertEqual(argv[:9], ["qvm-run", "-q", "-p", "--no-shell",
+                                    "--no-autostart", "--no-gui",
+                                    "--filter-escape-chars",
                                     "sys-firewall", "cat"])
-        self.assertEqual(argv[6:], [
+        self.assertEqual(argv[9:], [
             "/sys/class/net/vif12.0/statistics/rx_bytes",
             "/sys/class/net/vif12.0/statistics/tx_bytes"])
 
