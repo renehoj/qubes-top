@@ -83,27 +83,6 @@ first; its output usually shows the cause.
 The position of the divider between the two panes is saved in
 `~/.config/qubes-top/config.json`. There are no other settings.
 
-## Development
-
-The tests use only the Python standard library and run on any machine; they
-do not need Qubes or GTK:
-
-```sh
-python3 run_tests.py
-```
-
-Project layout:
-
-```
-qubes_top/
-├── core/        pure Python logic (no GTK or Qubes imports)
-├── dom0/        Qubes Admin API and xenstore adapters, probe and self-test
-└── ui/          GTK3 interface
-bin/qubes-top    launcher that runs the app from the source tree
-packaging/       dom0 installer, launcher scripts and .desktop file
-tests/           test suite
-```
-
 ## Uninstall
 
 In dom0:
