@@ -46,7 +46,7 @@ from qubes_top.ui.hostprovider import ProcHostProvider, host_to_record
 from qubes_top.ui.iostats import (IoHistory, NetIoProvider, RateMeter,
                                 read_vbd_bytes)
 from qubes_top.ui.labelcolors import LabelColorProvider
-from qubes_top.ui.model import LeftPaneModel
+from qubes_top.ui.model import LeftPaneModel, is_running
 from qubes_top.ui.processes import Dom0ProcProvider
 from qubes_top.ui.qubemeta import QubesAdminMetaProvider
 from qubes_top.ui.rowspec import RowData, dom0_rowdata
@@ -77,7 +77,24 @@ def _frame_status(frame) -> str:
     return "%d qube(s) · last sample %s" % (len(frame.qubes), stamp)
 
 
-def run() -> int:
+def _known_qube(qubes, name: str):
+    """Look ``name`` up in qubesd for ``--qube``. Returns ``(found, running)``;
+    ``(None, None)`` when qubesd cannot be asked (the start goes ahead and the
+    pane says whether the qube shows up)."""
+    if name == DOM0:
+        return True, True
+    try:
+        for dom in qubes.domains():
+            if dom.name == name:
+                return True, is_running(dom.state)
+    except Exception:  # best-effort: never block the start on this check
+        return None, None
+    return False, False
+
+
+def run(qube=None) -> int:
+    """Start the GUI. ``qube`` (``--qube NAME``) is selected at start, as if
+    it had been clicked; an unknown name is refused with exit 64."""
     # Fail cleanly if there is no display (a wrong host / a headless run) — an
     # exit code and a message, not a traceback from deep inside the stack.
     if not Gtk.init_check():
@@ -98,6 +115,15 @@ def run() -> int:
     # already take, so both dots read the same source and cannot disagree.
     color_for = LabelColorProvider(qubes=qubes).color_for
     model = LeftPaneModel(color_for=color_for)
+    if qube is not None:
+        found, running = _known_qube(qubes, qube)
+        if found is False:
+            sys.stderr.write("qubes-top: no qube named %r\n" % qube)
+            return 64
+        if running is False:
+            # a halted qube is hidden by default: show halted qubes so the
+            # selected row is in the list (set before the window reads it)
+            model.set_show_halted(True)
     host_model = SampleModel()
     host_provider = ProcHostProvider()
     meta_provider = QubesAdminMetaProvider(qubes=qubes)
@@ -288,6 +314,12 @@ def run() -> int:
     # box above them.
     charts = window.charts
     info = window.info
+
+    if qube is not None:
+        # --qube: select it like a click (the pane, the process poller and
+        # the I/O charts follow); the first frame fills in the data.
+        model.select(qube)
+        on_select(qube)
 
     def on_frame(frame) -> None:
         # The subscriber contract: hand the frame to the GLib main loop; the

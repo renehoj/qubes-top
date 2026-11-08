@@ -1,5 +1,6 @@
 """Command-line entry: ``python3 -m qubes_top`` (the GUI, card t_4d9516cd),
 ``python3 -m qubes_top --probe`` (the dom0 probe, card t_ae308ca8) and
+``python3 -m qubes_top --qube NAME`` (the GUI with NAME selected at start),
 ``python3 -m qubes_top --stage`` (the full staged dom0 test, card
 t_2e8dda49 — probe superset: imports, both GTK namespaces, is_composited,
 py_compile, the stdlib suite including the guards, the headless CLI).
@@ -21,7 +22,32 @@ from qubes_top.dom0.probe import run_probe
 from qubes_top.dom0.stage import run_stage
 
 USAGE = ("usage: python3 -m qubes_top "
-         "[--probe | --stage | --api-audit | (no args for the GUI) | --gui]")
+         "[--probe | --stage | --api-audit | [--gui] [--qube NAME]]")
+
+
+def parse_gui_args(argv):
+    """The GUI's arguments: ``[--gui] [--qube NAME | --qube=NAME | -q NAME]``
+    in any order. Returns the qube to select at start (``None`` for no
+    selection), or raises ``ValueError`` on anything else — the caller turns
+    that into the usage line and exit 64."""
+    qube = None
+    seen_gui = False
+    rest = list(argv)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--gui" and not seen_gui:
+            seen_gui = True
+        elif arg in ("--qube", "-q") and qube is None:
+            if not rest or not rest[0] or rest[0].startswith("-"):
+                raise ValueError("%s needs a qube name" % arg)
+            qube = rest.pop(0)
+        elif arg.startswith("--qube=") and qube is None:
+            qube = arg[len("--qube="):]
+            if not qube:
+                raise ValueError("--qube needs a qube name")
+        else:
+            raise ValueError("unexpected argument: %s" % arg)
+    return qube
 
 
 def _api_audit() -> int:
@@ -48,20 +74,23 @@ def main(argv=None) -> int:
         return run_stage()
     if argv == ["--api-audit"]:
         return _api_audit()
-    if argv == [] or argv == ["--gui"]:
-        # Deferred import: the GUI modules pull gi; a gi-less box must fail
-        # here (a clean message + exit code), not with a ModuleNotFoundError
-        # traceback from deep inside the stack.
-        try:
-            from qubes_top.ui.app import run as _run
-        except ModuleNotFoundError:
-            sys.stderr.write(
-                "qubes-top: the GUI requires GTK3 (PyGObject); this interpreter "
-                "has no 'gi'. The probe (--probe) does not need GTK3.\n")
-            return 2
-        return _run()
-    print(USAGE, file=sys.stderr)
-    return 64  # EX_USAGE: a mistyped invocation is not a refusal
+    try:
+        qube = parse_gui_args(argv)
+    except ValueError as exc:
+        print("qubes-top: %s" % exc, file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 64  # EX_USAGE: a mistyped invocation is not a refusal
+    # Deferred import: the GUI modules pull gi; a gi-less box must fail
+    # here (a clean message + exit code), not with a ModuleNotFoundError
+    # traceback from deep inside the stack.
+    try:
+        from qubes_top.ui.app import run as _run
+    except ModuleNotFoundError:
+        sys.stderr.write(
+            "qubes-top: the GUI requires GTK3 (PyGObject); this interpreter "
+            "has no 'gi'. The probe (--probe) does not need GTK3.\n")
+        return 2
+    return _run(qube=qube)
 
 
 if __name__ == "__main__":

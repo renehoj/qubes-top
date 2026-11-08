@@ -13,14 +13,15 @@ domains:
   (sys-firewall, usually), not in dom0; dom0's ``/proc/net/dev`` has nothing
   for it, which is why ``xentop``'s NETTX/NETRX read 0 on Qubes. The counters
   are read in the netvm with ``qvm-run -p --no-shell <netvm> cat
-  /sys/class/net/vif<domid>.0/statistics/{rx,tx}_bytes`` — the same bounded
+  /proc/net/dev`` and taken from its ``vif<domid>.*`` lines (any devid, so
+  a VPN or other non-default netvm works too) — the same bounded
   exception as the guest process table (D-15): fixed argv, no shell, the name
   validated, one read per tick for the selected qube only, on a background
   poller. The netvm writes those numbers, so they are untrusted (D-6):
   digits only, bounded length.
 
   The backend's ``rx`` is what the qube *sent* and its ``tx`` what the qube
-  *received*; ``parse_vif`` swaps them so every value here is from the qube's
+  *received*; ``parse_net_dev`` swaps them so every value here is from the qube's
   side ("in" = received, "out" = sent).
 
 Counters become per-second rates in ``RateMeter`` (a decrease or a new
@@ -29,6 +30,7 @@ per sampling tick so the charts can draw it on the same fixed window as the
 CPU line (``core.window_segments``).
 """
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Hashable, List, Optional, Sequence, Tuple
@@ -37,7 +39,7 @@ from qubes_top.core import HISTORY_WINDOW_S, TICK_S
 from qubes_top.ui.guestproc import QUBE_NAME_RE, qvm_run_prefix, run_qvm
 
 __all__ = [
-    "VBD_ROOT", "SECTOR_BYTES", "read_vbd_bytes", "vif_argv", "parse_vif",
+    "VBD_ROOT", "SECTOR_BYTES", "read_vbd_bytes", "NET_DEV", "vif_argv", "parse_net_dev",
     "NetIoReading", "NetIoProvider", "RateMeter", "IoHistory",
 ]
 
@@ -100,24 +102,63 @@ def read_vbd_bytes(domid: int, root: str = VBD_ROOT,
     return rd * SECTOR_BYTES, wr * SECTOR_BYTES
 
 
-def vif_argv(netvm: str, domid: int) -> List[str]:
-    """The argv that reads one qube's vif counters in its netvm. ``cat``
-    prints the two files in order; no shell (``qvm_run_prefix``)."""
-    base = "/sys/class/net/vif%d.0/statistics/" % domid
-    return qvm_run_prefix(netvm) + ["cat", base + "rx_bytes",
-                                    base + "tx_bytes"]
+#: The netvm's interface table: one line per interface, always present (a
+#: missing ``/sys/class/net/vif<domid>.0`` would leave nothing to say why).
+NET_DEV = "/proc/net/dev"
+
+#: A Qubes vif backend: ``vif<frontend domid>.<devid>``, plus the ``-emu``
+#: twin an HVM's emulated NIC gets.
+_VIF_RE = re.compile(r"vif(\d{1,9})\.(\d{1,4})(?:-emu)?")
+
+#: An interface name worth echoing in a note (D-6: the netvm wrote it).
+_IFNAME_RE = re.compile(r"[A-Za-z0-9_.@-]{1,32}")
+
+#: Bounds on the untrusted table: lines read, names echoed in a note.
+_MAX_LINES = 4096
+_MAX_NAMES = 8
 
 
-def parse_vif(text: Optional[str]) -> Optional[Tuple[int, int]]:
-    """``cat``'s two lines -> ``(in, out)`` bytes **from the qube's side**
-    (the backend's tx, then its rx), or None unless both are counters."""
-    fields = (text or "").split()
-    if len(fields) != 2:
-        return None
-    rx, tx = _counter(fields[0]), _counter(fields[1])
-    if rx is None or tx is None:
-        return None
-    return tx, rx
+def vif_argv(netvm: str) -> List[str]:
+    """The argv that reads the netvm's interface table. ``cat`` of one fixed
+    file; no shell (``qvm_run_prefix``)."""
+    return qvm_run_prefix(netvm) + ["cat", NET_DEV]
+
+
+def parse_net_dev(text: Optional[str], domid: int,
+                  ) -> Tuple[Optional[Tuple[int, int]], List[str]]:
+    """``/proc/net/dev`` -> ``((in, out), names)``.
+
+    ``(in, out)`` is the qube's bytes **from its own side** (the backend's
+    tx, then its rx), summed over every ``vif<domid>.*`` line, or None when
+    there is none or one of them is not two counters (D-6). ``names`` are the
+    table's interface names (sanitized, at most ``_MAX_NAMES``), so a note
+    can say what the netvm has instead.
+    """
+    names: List[str] = []
+    rx = tx = 0
+    found = bad = False
+    for line in (text or "").splitlines()[:_MAX_LINES]:
+        name, sep, rest = line.partition(":")
+        if not sep:
+            continue  # the two header lines
+        name = name.strip()
+        if _IFNAME_RE.fullmatch(name) and len(names) < _MAX_NAMES:
+            names.append(name)
+        m = _VIF_RE.fullmatch(name)
+        if m is None or int(m.group(1)) != domid:
+            continue
+        fields = rest.split()
+        r = _counter(fields[0]) if len(fields) >= 16 else None
+        t = _counter(fields[8]) if len(fields) >= 16 else None
+        if r is None or t is None:
+            bad = True
+            continue
+        found = True
+        rx += r
+        tx += t
+    if bad or not found:
+        return None, names
+    return (tx, rx), names
 
 
 @dataclass(frozen=True)
@@ -155,16 +196,17 @@ class NetIoProvider:
                 or domid < 0:
             return NetIoReading(None, self._clock(), "not a valid target")
         try:
-            rc, out, err = self._runner(vif_argv(netvm, domid), self._timeout)
+            rc, out, err = self._runner(vif_argv(netvm), self._timeout)
         except Exception as exc:  # a runner bug must not kill the poller
             return NetIoReading(None, self._clock(), "qvm-run failed: %s" % exc)
         ts = self._clock()
         if rc != 0:
             detail = _first_line(err) or ("exit status %s" % (rc,))
             return NetIoReading(None, ts, "%s: %s" % (netvm, detail))
-        counters = parse_vif(out)
+        counters, names = parse_net_dev(out, domid)
         if counters is None:
-            return NetIoReading(None, ts, "%s printed no vif counters" % netvm)
+            return NetIoReading(None, ts, "%s has no vif%d.* (has: %s)" % (
+                netvm, domid, ", ".join(names) or "no interfaces"))
         return NetIoReading(counters, ts)
 
 

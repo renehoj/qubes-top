@@ -8,6 +8,7 @@
 # a plain `dirname "$0"` would resolve to ~/.local instead.
 #
 #   bin/qubes-top             # the GUI
+#   bin/qubes-top --qube work # the GUI with the qube "work" selected
 #   bin/qubes-top --probe     # the dom0 probe
 #   bin/qubes-top --api-audit # check every gi symbol the UI calls
 
